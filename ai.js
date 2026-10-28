@@ -10,13 +10,70 @@ const v = p => p.type in VAL ? VAL[p.type] : 3;
 const opp = s => s==='w' ? 'b' : 'w';
 const TIMEOUT = {};
 
+/* 逼王相關的三個權重（實測結果見下，預設只開 NOREPEAT）
+
+   問題：雙方同級對打幾乎都打到步數上限。實測 medium 互打 40 局只有 8% 分出勝負，
+   advanced 互打 24 局是 0%。把上限從 200 放寬到 600 更糟（0% 分出勝負、每局都走滿 600 手），
+   所以這是真的僵局，不是「再多給幾手就會結束」。
+   原因有二：evaluate() 只算子力，雙方換到平手後評估值變得很平，AI 就原地來回走
+   （殘局棋譜常見 龍 b6→b7→b6、鞋子 g5→i3→g1→i3）；而且沒有任何一項會把棋子帶向敵王。
+
+   TROPISM（靠近敵王）／KINGBOX（堵死敵王出路）確實能讓 AI 去抓王，但代價很大。
+   以 medium 對 medium、新舊評估各執黑白 40 局實測（trop=0.8, box=0.25，未設子力門檻）：
+     吃王獲勝        新 6 : 舊 4   ← 抓王確實變強
+     打到上限比分數  新 2 : 舊 27  ← 但送子送到分數慘輸
+     整體勝率        20.5%
+   加上「子力領先才開啟」的門檻後勝率回到 47.5%，但分出勝負率也掉回 3%，
+   因為勢均力敵時門檻根本不會開啟。
+   結論：在「打到上限依子力分數判定勝負」的規則下，為了抓王而送子在數學上就是虧的，
+   這不是調參數能解決的取捨。因此 TROPISM／KINGBOX 預設為 0，要實驗再自行開啟：
+     CHESS_TROPISM=0.8 CHESS_KINGBOX=0.25 node tools/local-gen.js --direct --games 40
+   或呼叫 chooseActions 時傳 {tropism, kingbox}。想要「更多吃王結局、可以接受棋力變弱」就開它。
+
+   NOREPEAT（反空轉）預設開啟：它只在根節點對「走回已出現過的局面」扣分，不碰子力評分，
+   實測勝率 50.0%（等於沒變強也沒變弱），但可以消掉上面那種來回空轉的難看棋譜。 */
+let TROPISM = process.env.CHESS_TROPISM !== undefined ? +process.env.CHESS_TROPISM : 0;
+let KINGBOX = process.env.CHESS_KINGBOX !== undefined ? +process.env.CHESS_KINGBOX : 0;
+let NOREPEAT = process.env.CHESS_NOREPEAT !== undefined ? +process.env.CHESS_NOREPEAT : 0.5;
+function kingBox(k, K){            // 王周圍還能走的格子數（空格或可吃的敵子），0..8
+  if(!K) return 0;
+  let n = 0;
+  for(let dy=-1; dy<=1; dy++) for(let dx=-1; dx<=1; dx++){
+    if(!dx && !dy) continue;
+    const x = K.x+dx, y = K.y+dy;
+    if(x<0 || y<0 || x>=Rules.SIZE || y>=Rules.SIZE) continue;
+    const q = k.pieceAt(x,y);
+    if(!q || q.side!==K.side) n++;
+  }
+  return n;
+}
 function evaluate(k, side){
   let s = 0;
-  for(const p of k.pieces()){
+  const ps = k.pieces(), en = opp(side);
+  let myK = null, enK = null;
+  for(const p of ps){ if(p.type!=='king') continue; if(p.side===side) myK = p; else enK = p; }
+  let mat = 0;
+  for(const p of ps){
     let x = v(p);
     if(p.type==='t') x += (p.side==='w' ? Rules.SIZE-1-p.y : p.y) * 0.08;        // 龍越接近底線越好（可轉生）
     else if(p.type!=='king') x += (4 - Math.abs(p.x-4)) * 0.02;                   // 略偏好中路
     s += p.side===side ? x : -x;
+    if(p.type!=='king') mat += p.side===side ? v(p) : -v(p);
+  }
+  // 逼王只在「子力領先」時才開啟，而且領先越多壓得越兇。
+  // 不設這個條件的話，AI 會為了靠近敵王而送子：實測固定開啟時吃王數雖然變多（6:4），
+  // 但打到上限的局面幾乎全輸（2:27），整體勝率只剩兩成。
+  const push = Math.max(0, Math.min(1, mat / 12));
+  if(push > 0 && (TROPISM || KINGBOX)){
+    let trop = 0;
+    for(const p of ps){
+      if(p.type==='king') continue;
+      const K = p.side===side ? enK : myK;
+      if(!K) continue;
+      const near = Rules.SIZE - 1 - Math.max(Math.abs(p.x-K.x), Math.abs(p.y-K.y));
+      trop += p.side===side ? near : -near;
+    }
+    s += push * (TROPISM * trop + KINGBOX * (kingBox(k, myK) - kingBox(k, enK)));
   }
   return s;
 }
@@ -75,6 +132,14 @@ function rank(k, side, level, budget, rnd){
   }
   if(!scored) scored = root.map(({p,m}) => ({p,m,v:0}));
   if(!scored.length) return [];
+  if(NOREPEAT){        // 反空轉：回到舊局面的著法扣分（只在根節點做，不影響 evaluate 的子力評分）
+    const seen = new Set((k.rec() || []).map(r => r.k));
+    for(const sc of scored){
+      const h = k.trial(() => { k.play(sc.p, sc.m); return k.hash(); });
+      if(seen.has(h)) sc.v -= NOREPEAT;
+    }
+    scored.sort((a,b) => b.v - a.v);
+  }
   const best = scored[0].v;
   const pool = scored.filter(s => s.v >= best - (level==='advanced' ? 0.05 : 0.6));
   let first = pool[Math.floor(rnd()*pool.length)];
@@ -85,7 +150,11 @@ function rank(k, side, level, budget, rnd){
 let opt0 = {};
 function chooseActions(G, side, level='medium', opt={}){
   if(typeof Rules.kit!=='function') throw new Error('rules.js 缺少 Rules.kit（AI 需要）');
-  opt0 = opt; const rnd = opt.rnd || Math.random, budget = opt.budgetMs || ({beginner:120, advanced:1500, super:3000}[level] || 400);
+  opt0 = opt;
+  if(opt.tropism !== undefined) TROPISM = +opt.tropism;      // 每次呼叫可覆寫，方便對照測試
+  if(opt.kingbox !== undefined) KINGBOX = +opt.kingbox;
+  if(opt.norepeat !== undefined) NOREPEAT = +opt.norepeat;
+  const rnd = opt.rnd || Math.random, budget = opt.budgetMs || ({beginner:120, advanced:1500, super:3000}[level] || 400);
   const r = Rules.kit(G, k => {
     const ph = k.phase();
     if(ph){

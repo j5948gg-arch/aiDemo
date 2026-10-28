@@ -8,7 +8,7 @@
    最簡單的用法（起一台乾淨的伺服器，跑 10 局，印統計）：
      node tools/local-gen.js
 
-   ===== 最常要調的三件事：局數、白方強度、黑方強度 =====
+   ===== 最常要調的三件事：局數、白方強度、黑方強度 ===== 
      --games <數字>   要跑幾局。預設 10。
      --w <等級>       白方用哪一款 AI。預設 medium。
      --b <等級>       黑方用哪一款 AI。預設 medium。
@@ -22,11 +22,43 @@
      node tools/local-gen.js --games 40 --w medium,advanced --b beginner,medium
    統計會自動把每一種組合分開列出成績。
 
+   ===== 跑太慢、CPU 吃不滿的時候 =====
+   1. 先加 --direct。不加的話是走伺服器，每一手都要 WebSocket 來回，CPU 大半時間在等。
+      實測 2 核、8 局：伺服器模式 18.1 秒（CPU 只用到一半）vs --direct 4.3 秒。
+   2. --jobs 控制同時幾局（--direct 用）。預設＝核心數（os.cpus().length，含超執行緒）。
+      想留幾條給系統就直接指定，例如 20 執行緒的機器用 --jobs 19。
+      ⚠ --jobs 開到比核心數多，對兩類等級的影響完全相反：
+        beginner／medium 是固定深度（工作量固定、吃滿 CPU）→ 開多了只會互搶，略慢。
+          實測 2 核 8 局 medium：jobs 2 → 4.3 秒、jobs 4 → 4.7 秒。
+        advanced／super 是「算到時間到為止」→ 開多了每局牆鐘時間不變、但同時跑更多局，
+          吞吐量幾乎翻倍；代價是每手分到的 CPU 變少、搜尋變淺，棋力會下降。
+          實測 2 核 8 局 super：jobs 2 → 15.6 秒（CPU 28.5 秒）、jobs 4 → 8.4 秒（CPU 15.5 秒）
+          —— 快了一倍，但總運算量也少了一半，等於是用棋力換速度。
+      所以：要「大量對局資料」可以超開；要「衡量 AI 真實棋力」就把 --jobs 設成核心數以內。
+      伺服器模式對應的是 --concurrency，這支會自動設為核心數的 4 倍。
+      但要注意：伺服器模式的上限其實是「一顆核心」—— online-gen.js 是單一行程、AI 思考是同步的，
+      實測 concurrency 開到 64，user/wall 仍然只有 0.95（＝只吃滿一顆核）。
+      所以 10 核、20 執行緒的機器跑伺服器模式，也只會用到大約 1～2 顆核心的量；
+      想真正把多核吃滿，只有 --direct 這條路（它是多執行緒，--jobs 預設就等於核心數）。
+   3. 最大的成本是 --budget（每手思考毫秒），但只對 advanced／super 有影響，而且幾乎是線性的：
+      實測 super 6 局：budget 30 → 5.4 秒、90 → 14.3 秒、300 → 45.8 秒。
+      beginner／medium 是固定深度，調 budget 幾乎沒差（實測 2.5 秒 vs 2.6 秒）。
+      所以要「大量對局」就把 budget 調小；要「棋力準確」才調大。
+   4. --cap 直接決定最壞情況要走幾手。medium 互打很容易一路打到上限，
+      想快就把 cap 調小，或把雙方強弱拉開（例如 --w super --b beginner）讓對局提早結束。
+   總結：大量資料用 `--direct --budget 30 --cap 120`，要擬真棋力就提高 budget 並接受變慢。
+
    其他常調的：
      --cap <數字>     單局步數上限，超過就算未分勝負。預設 250（--direct 預設 180）。
      --budget <毫秒>  AI 每一手的思考時間。調大＝棋力強但慢。預設 300（--direct 預設 90）。
      --out <檔名>     輸出檔位置。預設 local-runs/games.jsonl。
      --fresh          先清掉舊的輸出檔，不要接在後面。
+     --stale-cut <N>  連續 N 手沒有任何吃子就提早結束這一局（只有 --direct 支援）。
+                      用來省生成時間，但「不是免費的」：安靜一段之後仍可能再爆發吃子，
+                      所以調小等於提早判定了一些還沒死的局面。
+                      實測 12 局 medium 互打：N=40 平均手數 200→69（24.7 秒→8.5 秒，快約 3 倍）；
+                      N=80 只省約 7%（200→186），勝負分布與不開時在誤差內。
+                      要大量產資料就調小，要資料忠實就調大或別用。
    註：上面那份「全部都是 medium vs medium、250 手、10 局」的結果，就是完全沒加參數跑出來的預設值。
 
    大量模擬請加 --direct：完全跳過伺服器與 WebSocket，直接用 tools/sim.js 在多條執行緒上對弈，
@@ -61,28 +93,28 @@ const ROOT = path.join(__dirname, '..');
 // ---------- --direct 的 worker：不經過伺服器，直接用 sim.js 把整局在這條執行緒上下完 ----------
 if (!isMainThread && workerData && workerData.direct) {
   const Rules = require('../public/rules.js'), {playGame} = require('./sim.js');
-  const {seeds, w, b, budget, cap, openTol, openPlies} = workerData;
+  const {seeds, w, b, budget, cap, openTol, openPlies, run, staleCut} = workerData;
   const pick = (a, r) => a[Math.floor(r * a.length) % a.length];
   for (const seed of seeds) {
     // 策略與開局亂數由 seed 決定；但 AI 以時間為搜尋上限，所以同一個 seed 不保證走出同一局
     const r0 = ((seed * 2654435761) % 4294967296) / 4294967296, r1 = ((seed * 1597334677) % 4294967296) / 4294967296;
     const sw = pick(w, r0), sb = pick(b, r1), t0 = Date.now();
     let pts = {w: 0, b: 0}, left = {w: 0, b: 0};
-    const g = playGame({seed, w: sw, b: sb, bw: budget, bb: budget, moveCap: cap, openTol, openPlies,
+    const g = playGame({seed, w: sw, b: sb, bw: budget, bb: budget, moveCap: cap, openTol, openPlies, staleCut,
       onPly: G => { pts = {w: Rules.pts(G, 'w'), b: Rules.pts(G, 'b')};
         left = {w: G.pieces.filter(p => p.side === 'w').length, b: G.pieces.filter(p => p.side === 'b').length}; }});
     parentPort.postMessage({          // 欄位對齊 online-gen.js 的紀錄格式，統計與 --report-only 才能共用
-      id: 'd' + seed, run: 'direct', mode: 'direct', seed, t: new Date(t0).toISOString(), ms: Date.now() - t0,
+      id: (run || 'd') + '-' + seed, run: run || 'direct', mode: 'direct', seed, t: new Date(t0).toISOString(), ms: Date.now() - t0,
       white: {id: 'sim-' + sw, strat: sw}, black: {id: 'sim-' + sb, strat: sb}, room: 'direct',
-      over: g.over || null, reason: g.capped ? '步數上限' : (g.reason || 'king'), result: g.result || null,
-      capped: g.capped, moves: g.moves, pts, left, actions: g.actions, log: g.hist});
+      over: g.over || null, reason: g.stale ? '停滯中止' : (g.capped ? '步數上限' : (g.reason || 'king')), result: g.result || null,
+      capped: g.capped, moves: g.moves, stale: !!g.stale, pts, left, actions: g.actions, log: g.hist});
   }
   parentPort.postMessage({done: true});
   return;
 }
 // 自己手動掃 argv：這支認得的參數吃掉，其餘「原封不動」轉給 online-gen.js。
 // （不能用 parseArgs 的 strict:false 來做，它會把不認得的 --w medium 當成布林旗標＋位置參數，順序就亂了。）
-const TAKES_VALUE = new Set(['port', 'games', 'out', 'bot-delay', 'jobs', 'seed']);
+const TAKES_VALUE = new Set(['port', 'games', 'out', 'bot-delay', 'jobs', 'seed', 'stale-cut']);
 const FLAGS = new Set(['test', 'reuse', 'keep-server', 'report-only', 'fresh', 'quiet', 'help', 'direct']);
 const O = {games: '10', out: 'local-runs/games.jsonl', 'bot-delay': '0'}, REST = [];
 for (const argv = process.argv.slice(2), it = argv[Symbol.iterator](); ; ) {
@@ -185,6 +217,7 @@ async function runDirect() {
   say(`直接模式：${games} 局、${jobs} 條執行緒、每手 ${budget}ms、步數上限 ${cap}（不起伺服器、不經過 WebSocket）`);
   say(`白 ${w.join('/')} vs 黑 ${b.join('/')}｜seed ${seed0}…${seed0 + games - 1}\n`);
 
+  const RUN = Date.now().toString(36).slice(-4);   // 每次執行一個代號，不同批次的 id 才不會撞在一起
   const seeds = Array.from({length: games}, (_, i) => seed0 + i);
   const buckets = Array.from({length: jobs}, () => []);
   seeds.forEach((s, i) => buckets[i % jobs].push(s));   // 輪流分配，每條執行緒的工作量差不多
@@ -199,7 +232,7 @@ async function runDirect() {
       + (m.log || []).map((l, i) => `${i + 1}. ${l}`).join('\n') + '\n\n';
   };
   await Promise.all(buckets.map(bucket => new Promise((res, rej) => {
-    const wk = new Worker(__filename, {workerData: {direct: true, seeds: bucket, w, b, budget, cap, openTol, openPlies}});
+    const wk = new Worker(__filename, {workerData: {direct: true, seeds: bucket, w, b, budget, cap, openTol, openPlies, run: RUN, staleCut: +O['stale-cut'] || 0}});
     wk.on('message', m => {
       if (m.done) return;
       fs.writeSync(fd, JSON.stringify(m) + '\n');
@@ -258,7 +291,16 @@ async function runDirect() {
   const stop = () => { if (srv && !O['keep-server']) { try { srv.kill(); } catch (e) {} srv = null; } };
   process.on('SIGINT', () => { stop(); process.exit(130); });
 
-  const args = ['tools/online-gen.js', '--url', url, '--games', String(O.games), '--out', OUT, ...REST];
+  // online-gen.js 的 --concurrency 預設只有 2（為了不打爆線上網站），本機沒這個顧慮：
+  // 預設 2 的時候大部分時間都卡在 WebSocket 來回、CPU 閒著，所以這裡改成跟著核心數走。
+  // 伺服器模式是「等網路」而不是「吃 CPU」，所以同時局數要開得比核心數多才填得滿，
+  // 這裡取核心數的 4 倍（不設上限），實測 2 核跑 8 局：concurrency 2 → 18.1 秒、8 → 8.6 秒。
+  // 注意 online-gen.js 是「單一行程」，AI 思考是同步的：並行度拉高只能把等網路的時間疊起來，
+  // 一旦 CPU 吃滿就不會再快（甚至變慢）。真的要靠核心數擴充請用 --direct，那邊才是多執行緒。
+  const conc = REST.includes('--concurrency') ? null : Math.max(2, Math.min(os.cpus().length * 4, +O.games));
+  if (conc) say(`（未指定 --concurrency，依 ${os.cpus().length} 核自動設為 ${conc}；online-gen 預設的 2 會讓 CPU 大半時間閒等 WebSocket）`);
+  const args = ['tools/online-gen.js', '--url', url, '--games', String(O.games), '--out', OUT,
+    ...(conc ? ['--concurrency', String(conc)] : []), ...REST];
   say(`生成對局：node ${args.join(' ')}\n`);
   const t0 = Date.now();
   const r = await run(process.execPath, args, {quiet: O.quiet});
