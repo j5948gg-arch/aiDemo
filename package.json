@@ -9,7 +9,9 @@
     "selfplay": "node tools/selfplay.js 100 90 180 data/selfplay.jsonl",
     "analyze": "node tools/analyze.js data/selfplay.jsonl",
     "puzzles": "node tools/puzzles.js 280 data/puzzles-raw.jsonl",
-    "build-data": "node tools/build-data.js"
+    "build-data": "node tools/build-data.js",
+    "build-local": "node tools/build-local.js",
+    "local-gen": "node tools/local-gen.js"
   },
   "engines": {
     "node": ">=18"
