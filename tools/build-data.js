@@ -27,23 +27,13 @@ const lv = {}, th = {}; out.forEach(q => { lv[q.level] = (lv[q.level] || 0) + 1;
 console.log('題庫：', out.length, '題；驗證失敗', bad.length, JSON.stringify(bad.slice(0, 3)), '難度分布', JSON.stringify(lv), '主題', JSON.stringify(th));
 
 // ---------- 2. 高手對決 ----------
-const an = JSON.parse(fs.readFileSync('data/analysis.json', 'utf8')), picked = JSON.parse(fs.readFileSync('data/picked.json', 'utf8'));
-const S = s => s === 'w' ? '白方' : '黑方';
-const TXT = {
-  54: ['白方曾領先 14 分，黑方連續斬擊追回', '領先權換了 16 次。白方一度領先 14 分，黑方靠咚連續三次斬殺白方的龍、再復活熨斗穩住，最後以 4 分之差逆轉。'],
-  98: ['十七次易主的拉鋸戰', '領先權換了 17 次，分差始終沒有超過 7 分。雙方輪流用咚斬擊、用復活補強，終局 38 比 35，黑方險勝。'],
-  59: ['復活與斬擊交錯的混戰', '領先權換了 17 次，四次復活、兩次斬擊。黑方復活夜王、鞋子補位，最後 30 比 27 勝出。'],
-  58: ['落後 12 分的大逆轉', '白方一度落後 12 分，之後吃回子力並在終局以 29 比 28 險勝，只差 1 分。這局的重點是落後時沒有急著換子。'],
-  30: ['最晚才吃第一口', '第 53 手才出現第一次吃子，前半盤純粹是佈陣。之後白方一度領先 13 分，最後 32 比 29 守住優勢。']
-};
-const games = picked.map((g, k) => {
-  const G = Rules.create(); g.actions.forEach(x => Rules.play(G, x.s, x.a, 0)); const live = clone(G); Rules.adjudicate(live);
-  if (live.over !== g.over || JSON.stringify(live.result.total) !== JSON.stringify(g.result.total)) throw new Error('回放結果與原紀錄不一致 seed ' + g.seed);
-  const t = g.result.total, [title, summary] = TXT[g.seed];
-  return {id: g.seed, title, summary, moves: g.moves, capped: true, badges: [`領先易主 ${g.changes} 次`, `斬擊 ${g.ev.slash} 次`, `復活 ${g.ev.revive} 次`, `最大逆轉 ${g.comeback} 分`],
-    result: {over: g.over, reason: g.reason, text: `${S(g.over)}獲勝（到達步數上限，依分數判定　白 ${t.w}：黑 ${t.b}）`}, actions: g.actions, notes: g.notes, mat: g.mat};
+const an = JSON.parse(fs.readFileSync('data/analysis.json', 'utf8')), rp = JSON.parse(fs.readFileSync('data/replays.json', 'utf8'));   // replays.json 由 tools/import-replays.js 從對局文字檔產生
+const games = rp.games.map(g => {
+  const G = Rules.create(); g.actions.forEach(x => { if (Rules.play(G, x.s, x.a, 0).ok === false) throw new Error('回放動作不合法 ' + g.id); }); Rules.adjudicate(G);
+  if (G.over !== g.over || G.over !== g.result.over) throw new Error('回放結果與紀錄不一致 ' + g.id);
+  return {id: g.id, title: g.title, summary: g.summary, moves: g.moves, capped: g.capped, badges: g.badges, result: g.result, actions: g.actions, notes: g.notes, mat: g.mat};
 });
-fs.writeFileSync('public/data/games.json', JSON.stringify({intro: '五局都是「超高階 AI 對超高階 AI」的自我對弈（每手思考 0.09 秒，限制 180 手，到上限依分數判定）。從 100 局裡，用領先易主次數、分差起伏、逆轉幅度、特殊機制次數與終局分差挑出。按「播放」自動看，或用「上一手／下一手」慢慢研究；可以隨時暫停、拖曳進度。', games}));
+fs.writeFileSync('public/data/games.json', JSON.stringify({intro: rp.intro, games}));
 console.log('高手對決：', games.length, '局，重播結果與紀錄一致');
 
 // ---------- 3. 教學：戰術規律 ----------

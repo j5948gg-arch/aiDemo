@@ -11,7 +11,8 @@
     "puzzles": "node tools/puzzles.js 280 data/puzzles-raw.jsonl",
     "build-data": "node tools/build-data.js",
     "build-local": "node tools/build-local.js",
-    "local-gen": "node tools/local-gen.js"
+    "local-gen": "node tools/local-gen.js",
+    "import-replays": "node tools/import-replays.js"
   },
   "engines": {
     "node": ">=18"
