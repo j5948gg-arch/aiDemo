@@ -12,7 +12,9 @@
     "build-data": "node tools/build-data.js",
     "build-local": "node tools/build-local.js",
     "local-gen": "node tools/local-gen.js",
-    "import-replays": "node tools/import-replays.js"
+    "import-replays": "node tools/import-replays.js",
+    "analyze-games": "node tools/analyze-games.js",
+    "opening-lab": "node tools/opening-lab.js"
   },
   "engines": {
     "node": ">=18"

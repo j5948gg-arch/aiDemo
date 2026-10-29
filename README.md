@@ -110,6 +110,8 @@ npm run build-data   # 驗證並輸出 public/data/*.json
 - `ai.js`：四款 AI 的入口（初階／中等／進階）；`ai-super.js`、`ai-eval.js`：超高階的搜尋與評估；`ai-worker.js`：AI 的 worker 執行緒。
 - `tools/`：自我對弈、分析、題庫求解與產生、資料驗證與輸出。
 - `public/learn.js`：題庫、回放、教學的介面；`public/data/`：題庫、五局回放、教學資料。
+- `tools/analyze-games.js`：把 `games.jsonl` 逐局重播並統計（王怎麼死的、王太早出動、棋子存活與勝率、先斬擊、開局等），每個比較附 z 值；之後有新資料重跑一次就能更新教學的「規律」。`node tools/analyze-games.js <games.jsonl>`
+- `tools/opening-lab.js`：開局實驗室。讓同一個 AI 對打，一方強制走指定開局（或前 N 手禁止動王、或調整評估權重），與「自由 vs 自由」的對照組比較得分率並給信賴區間，用來驗證一個開局體系是否真的有用。用法見檔案開頭。
 - `public/rules.js`：棋子設定與全部規則，瀏覽器和伺服器共用。
 - `public/index.html`：網頁畫面。
 - `test/e2e.js`：端對端測試。
